@@ -10,7 +10,15 @@ import {
   OAuthError,
   TOKENS_FILE,
 } from "./auth";
-import { getVehicleChargingStatus, TeslaApiError } from "./tesla";
+import {
+  getVehicleChargingStatus,
+  startCharging,
+  stopCharging,
+  setChargingAmps,
+  MIN_CHARGING_AMPS,
+  MAX_CHARGING_AMPS,
+  TeslaApiError,
+} from "./tesla";
 
 const router = Router();
 
@@ -94,6 +102,65 @@ router.get("/vehicle", async (_req: Request, res: Response) => {
   try {
     const config = loadConfig();
     res.json(await getVehicleChargingStatus(config));
+  } catch (err) {
+    handleError(res, err);
+  }
+});
+
+/** Body accepted by POST /charge/current. */
+interface SetCurrentRequestBody {
+  amps: number;
+}
+
+function parseAmps(body: unknown): number | null {
+  if (typeof body !== "object" || body === null) {
+    return null;
+  }
+  const amps = (body as Partial<SetCurrentRequestBody>).amps;
+  if (
+    typeof amps !== "number" ||
+    !Number.isInteger(amps) ||
+    amps < MIN_CHARGING_AMPS ||
+    amps > MAX_CHARGING_AMPS
+  ) {
+    return null;
+  }
+  return amps;
+}
+
+/** Starts charging the account's first vehicle. */
+router.post("/charge/start", async (_req: Request, res: Response) => {
+  try {
+    const config = loadConfig();
+    res.json(await startCharging(config));
+  } catch (err) {
+    handleError(res, err);
+  }
+});
+
+/** Stops charging the account's first vehicle. */
+router.post("/charge/stop", async (_req: Request, res: Response) => {
+  try {
+    const config = loadConfig();
+    res.json(await stopCharging(config));
+  } catch (err) {
+    handleError(res, err);
+  }
+});
+
+/** Sets the charging current. Body: { "amps": 16 } (integer, 5-32). */
+router.post("/charge/current", async (req: Request, res: Response) => {
+  try {
+    const amps = parseAmps(req.body);
+    if (amps === null) {
+      res.status(400).json({
+        error: "invalid_amps",
+        message: `Body must be JSON of the form {"amps": n} where n is an integer between ${MIN_CHARGING_AMPS} and ${MAX_CHARGING_AMPS}.`,
+      });
+      return;
+    }
+    const config = loadConfig();
+    res.json(await setChargingAmps(config, amps));
   } catch (err) {
     handleError(res, err);
   }

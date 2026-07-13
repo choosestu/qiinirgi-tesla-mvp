@@ -224,3 +224,139 @@ export async function getVehicleChargingStatus(
   const data = await getVehicleData(config, vin);
   return mapChargeState(data.vin, data.charge_state);
 }
+
+// ---------------------------------------------------------------------------
+// Vehicle commands (milestone 4)
+// Docs: https://developer.tesla.com/docs/fleet-api/endpoints/vehicle-commands
+// ---------------------------------------------------------------------------
+
+/** Result envelope returned by Tesla command endpoints. */
+interface TeslaCommandResult {
+  result: boolean;
+  reason: string;
+}
+
+/** Outcome of a charging command, returned to API clients. */
+export interface ChargeCommandOutcome {
+  command: "charge_start" | "charge_stop" | "set_charging_amps";
+  vin: string;
+  result: boolean;
+  reason: string;
+}
+
+/** Charging current bounds accepted by this service. */
+export const MIN_CHARGING_AMPS = 5;
+export const MAX_CHARGING_AMPS = 32;
+
+function isCommandResult(value: unknown): value is TeslaApiResponse<TeslaCommandResult> {
+  const v = value as TeslaApiResponse<TeslaCommandResult>;
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    typeof v.response === "object" &&
+    v.response !== null &&
+    typeof v.response.result === "boolean"
+  );
+}
+
+async function fleetPost(
+  config: AppConfig,
+  path: string,
+  accessToken: string,
+  tokenType: string,
+  body?: Record<string, unknown>
+): Promise<Response> {
+  // Commands go to the command base URL, which should be a Vehicle Command
+  // Proxy for modern vehicles (unsigned REST commands are rejected by 2021+ vehicles).
+  const url = new URL(path, config.teslaCommandBase);
+
+  try {
+    return await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: authHeader(tokenType, accessToken),
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (err) {
+    throw new TeslaApiError(
+      `Could not reach Tesla command endpoint at ${url.host}. ` +
+        `If TESLA_COMMAND_BASE points at a Vehicle Command Proxy, verify it is running.`,
+      undefined,
+      err
+    );
+  }
+}
+
+async function sendChargeCommand(
+  config: AppConfig,
+  command: ChargeCommandOutcome["command"],
+  body?: Record<string, unknown>
+): Promise<ChargeCommandOutcome> {
+  const vehicles = await listVehicles(config);
+  if (vehicles.length === 0) {
+    throw new TeslaApiError("No vehicles found on this Tesla account.");
+  }
+  const vin = vehicles[0].vin;
+
+  const tokens = await loadStoredTokens();
+  const response = await fleetPost(
+    config,
+    `/api/1/vehicles/${encodeURIComponent(vin)}/command/${command}`,
+    tokens.access_token,
+    tokens.token_type,
+    body
+  );
+  const parsed = await parseJsonBody(response);
+
+  if (!response.ok) {
+    throw new TeslaApiError(
+      `Tesla ${command} failed for VIN ${vin} (HTTP ${response.status}): ${JSON.stringify(parsed)}. ` +
+        `Note: modern vehicles reject unsigned commands; commands must be routed ` +
+        `through a Vehicle Command Proxy with your virtual key installed.`,
+      response.status
+    );
+  }
+
+  if (!isCommandResult(parsed)) {
+    throw new TeslaApiError(
+      `Tesla ${command} response has an unexpected shape: ${JSON.stringify(parsed)}`
+    );
+  }
+
+  return {
+    command,
+    vin,
+    result: parsed.response.result,
+    reason: parsed.response.reason ?? "",
+  };
+}
+
+/** Starts charging the account's first vehicle. */
+export async function startCharging(config: AppConfig): Promise<ChargeCommandOutcome> {
+  return sendChargeCommand(config, "charge_start");
+}
+
+/** Stops charging the account's first vehicle. */
+export async function stopCharging(config: AppConfig): Promise<ChargeCommandOutcome> {
+  return sendChargeCommand(config, "charge_stop");
+}
+
+/**
+ * Sets the charging current in amps.
+ * amps must be an integer between MIN_CHARGING_AMPS and MAX_CHARGING_AMPS inclusive.
+ */
+export async function setChargingAmps(
+  config: AppConfig,
+  amps: number
+): Promise<ChargeCommandOutcome> {
+  if (!Number.isInteger(amps) || amps < MIN_CHARGING_AMPS || amps > MAX_CHARGING_AMPS) {
+    throw new TeslaApiError(
+      `Invalid charging amps ${amps}: must be an integer between ${MIN_CHARGING_AMPS} and ${MAX_CHARGING_AMPS}.`,
+      400
+    );
+  }
+  return sendChargeCommand(config, "set_charging_amps", { charging_amps: amps });
+}

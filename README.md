@@ -2,7 +2,7 @@
 
 Tesla Fleet API proof of concept for intelligent EV charging.
 
-**Current state (milestone 3):** Tesla OAuth 2.0 and a Fleet API client that reads live vehicle charging status. No charging commands or token refresh yet.
+**Current state (milestone 4):** Tesla OAuth, live vehicle charging status, and charging commands (start, stop, set current). No token refresh yet.
 
 ## Requirements
 
@@ -32,6 +32,7 @@ cp .env.example .env
 | `TESLA_AUTH_BASE` | OAuth authorize base. Default `https://auth.tesla.com` |
 | `TESLA_TOKEN_BASE` | Token exchange base. Tesla requires `https://fleet-auth.prd.vn.cloud.tesla.com` |
 | `TESLA_API_BASE` | Your region's Fleet API base URL, used as token `audience`. Default is North America |
+| `TESLA_COMMAND_BASE` | Where vehicle commands are sent. Point at a running [Vehicle Command Proxy](https://github.com/teslamotors/vehicle-command) for 2021+ vehicles. Defaults to `TESLA_API_BASE` |
 | `PORT` | Server port. Default `3000` |
 
 ## Install and run
@@ -113,6 +114,31 @@ If the access token has expired, re-authenticate at `/login` (token refresh is n
 | `GET /callback` (also `GET /auth/tesla/callback`) | Exchanges code for tokens, saves `tokens.json` |
 | `GET /auth/status` | Reports authentication status (token presence and expiry, no token values) |
 | `GET /vehicle` | Live charging status for the first vehicle on the account |
+| `POST /charge/start` | Start charging the account's first vehicle |
+| `POST /charge/stop` | Stop charging |
+| `POST /charge/current` | Set charging current. Body: `{"amps": 16}` (integer, 5 to 32) |
+
+## Charging commands
+
+All commands act on the first vehicle of the authenticated account and require a valid `tokens.json` (authenticate at `/login` first).
+
+```bash
+curl -X POST http://localhost:3000/charge/start
+curl -X POST http://localhost:3000/charge/stop
+curl -X POST http://localhost:3000/charge/current \
+  -H "Content-Type: application/json" \
+  -d '{"amps":16}'
+```
+
+Responses have the shape:
+
+```json
+{ "command": "set_charging_amps", "vin": "5YJ...", "result": true, "reason": "" }
+```
+
+`result: false` with a `reason` (for example `is_charging`, `disconnected`, `not_charging`) means Tesla accepted the request but the vehicle declined it; this is a vehicle state issue, not an API error.
+
+**Important, 2021+ vehicles:** Tesla rejects unsigned REST commands for modern vehicles. You must run Tesla's [Vehicle Command Proxy](https://github.com/teslamotors/vehicle-command) with your application's virtual key installed on the vehicle, and set `TESLA_COMMAND_BASE` to the proxy's URL. Pre-2021 Model S/X and most business fleet vehicles work without the proxy.
 
 ## Project structure
 
