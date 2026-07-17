@@ -46,12 +46,30 @@ export class OAuthError extends Error {
   }
 }
 
-export const TOKENS_FILE = path.resolve(process.cwd(), "tokens.json");
+/**
+ * Directory tokens.json is stored in. Defaults to the working directory,
+ * which on most container platforms (including Railway without an attached
+ * Volume) is ephemeral and can be reset on restart, redeploy, or a
+ * scale-to-zero event, silently losing the stored tokens.
+ *
+ * Set TOKENS_DIR to the mount path of a persistent Volume (e.g. "/data")
+ * to survive restarts. Falls back to process.cwd() for local dev.
+ */
+const TOKENS_DIR =
+  process.env.TOKENS_DIR && process.env.TOKENS_DIR.trim() !== ""
+    ? process.env.TOKENS_DIR.trim()
+    : process.cwd();
+
+export const TOKENS_FILE = path.resolve(TOKENS_DIR, "tokens.json");
 
 // In-memory store of issued state values (CSRF protection).
-// Fine for a single-instance MVP; states expire after 10 minutes.
+// Fine for a single-instance MVP; states expire after STATE_TTL_MS.
+// Widened from an earlier 10-minute window: a real user going through
+// Tesla's login (which may require 2FA or an email verification code)
+// can easily take longer than 10 minutes, causing a legitimate login
+// attempt to fail with "invalid_state" through no fault of their own.
 const pendingStates = new Map<string, number>();
-const STATE_TTL_MS = 10 * 60 * 1000;
+const STATE_TTL_MS = 30 * 60 * 1000;
 
 /** Generates a random state value and remembers it for later validation. */
 export function createState(): string {
@@ -215,7 +233,7 @@ export async function refreshTokens(
   return body;
 }
 
-/** Persists tokens to tokens.json in the project root. */
+/** Persists tokens to tokens.json in TOKENS_DIR. */
 export async function saveTokens(tokens: TeslaTokenResponse): Promise<void> {
   const stored: StoredTokens = {
     access_token: tokens.access_token,
@@ -226,7 +244,14 @@ export async function saveTokens(tokens: TeslaTokenResponse): Promise<void> {
   };
   try {
     await writeFile(TOKENS_FILE, JSON.stringify(stored, null, 2) + "\n", "utf8");
+    // Deliberately logged: this is the one line of evidence that a save
+    // actually happened, so a future "why did my tokens disappear" can be
+    // answered by checking whether this line exists in Deploy Logs at all.
+    console.log(
+      `[auth] Tokens saved to ${TOKENS_FILE} (obtained_at=${stored.obtained_at}, expires_in=${stored.expires_in}s)`
+    );
   } catch (err) {
+    console.error(`[auth] Failed to write tokens to ${TOKENS_FILE}:`, err);
     throw new OAuthError(`Failed to write ${TOKENS_FILE}: ${(err as Error).message}`, err);
   }
 }
@@ -245,7 +270,15 @@ export async function loadStoredTokens(): Promise<StoredTokens> {
   let raw: string;
   try {
     raw = await (await import("node:fs/promises")).readFile(TOKENS_FILE, "utf8");
-  } catch {
+  } catch (err) {
+    // ENOENT (file genuinely doesn't exist, e.g. never authenticated, or the
+    // volume was reset) is the expected case. Anything else -- permissions,
+    // a transient disk error, etc. -- gets logged so it isn't silently
+    // indistinguishable from "just never logged in."
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== "ENOENT") {
+      console.error(`[auth] Unexpected error reading ${TOKENS_FILE}:`, err);
+    }
     throw new OAuthError(
       `No tokens.json found at ${TOKENS_FILE}. Authenticate at /login first.`
     );
@@ -309,7 +342,11 @@ export async function getAuthStatus(): Promise<AuthStatus> {
   let raw: string;
   try {
     raw = await (await import("node:fs/promises")).readFile(TOKENS_FILE, "utf8");
-  } catch {
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== "ENOENT") {
+      console.error(`[auth] Unexpected error reading ${TOKENS_FILE} in getAuthStatus:`, err);
+    }
     return {
       authenticated: false,
       message: "No tokens.json found. Authenticate at /login.",
