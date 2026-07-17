@@ -14,6 +14,13 @@ const SCOPES = [
   "vehicle_charging_cmds",
 ].join(" ");
 
+/**
+ * How much time before the recorded expiry we treat an access token as
+ * "expired" and proactively refresh it. This avoids a race where a token
+ * is valid when checked but expires mid-request.
+ */
+const EXPIRY_BUFFER_MS = 5 * 60 * 1000;
+
 /** Response body from Tesla's /oauth2/v3/token endpoint. */
 export interface TeslaTokenResponse {
   access_token: string;
@@ -141,6 +148,73 @@ export async function exchangeCodeForTokens(
   return body;
 }
 
+/**
+ * Exchanges a stored refresh token for a new access token (and a new refresh
+ * token, which Tesla rotates on every use).
+ *
+ * Per Tesla docs, the refresh grant does NOT take client_secret or audience,
+ * only grant_type, client_id, and refresh_token:
+ * https://developer.tesla.com/docs/fleet-api/authentication/third-party-tokens#refresh-tokens
+ *
+ * Tesla keeps the immediately-prior refresh token valid for up to 24 hours
+ * as a safety net, but the new refresh_token returned here must be persisted
+ * so the *next* refresh has a token to use.
+ */
+export async function refreshTokens(
+  config: AppConfig,
+  refreshToken: string
+): Promise<TeslaTokenResponse> {
+  const url = new URL("/oauth2/v3/token", config.teslaTokenBase);
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        client_id: config.teslaClientId,
+        refresh_token: refreshToken,
+      }),
+    });
+  } catch (err) {
+    throw new OAuthError(
+      `Could not reach Tesla token endpoint at ${url.host} to refresh tokens. Check your network connection.`,
+      err
+    );
+  }
+
+  const bodyText = await response.text();
+
+  if (!response.ok) {
+    // Per Tesla docs, a 401 login_required here means the refresh token is
+    // expired/cycled out, or the user changed their Tesla password. Either
+    // way, the only fix is a fresh /login.
+    throw new OAuthError(
+      `Tesla token refresh failed (HTTP ${response.status}). ` +
+        `If this is a 401, the refresh token is no longer valid and someone must ` +
+        `re-authenticate at /login. Response: ${bodyText}`
+    );
+  }
+
+  let body: unknown;
+  try {
+    body = JSON.parse(bodyText);
+  } catch {
+    throw new OAuthError(
+      `Tesla token endpoint returned non-JSON response during refresh: ${bodyText}`
+    );
+  }
+
+  if (!isTokenResponse(body)) {
+    throw new OAuthError(
+      `Tesla refresh response is missing access_token or refresh_token. Response: ${bodyText}`
+    );
+  }
+
+  return body;
+}
+
 /** Persists tokens to tokens.json in the project root. */
 export async function saveTokens(tokens: TeslaTokenResponse): Promise<void> {
   const stored: StoredTokens = {
@@ -197,6 +271,39 @@ export async function loadStoredTokens(): Promise<StoredTokens> {
   return stored;
 }
 
+/** True if the stored token is expired, or close enough to expiry to refresh proactively. */
+function isExpiringSoon(stored: StoredTokens): boolean {
+  const obtained = new Date(stored.obtained_at).getTime();
+  const expiresAt = obtained + stored.expires_in * 1000;
+  return Date.now() >= expiresAt - EXPIRY_BUFFER_MS;
+}
+
+/**
+ * Returns a valid access token + token type for calling the Fleet API,
+ * transparently refreshing via the stored refresh token if the current
+ * access token is expired or about to expire. Callers (tesla.ts) should
+ * use this instead of reading tokens.json directly, so token expiry is
+ * never their problem.
+ *
+ * Throws OAuthError if there are no stored tokens, or if the refresh
+ * token itself has been rejected (expired, cycled out, or the user
+ * changed their Tesla password) -- in which case a human needs to hit
+ * /login again.
+ */
+export async function getValidAccessToken(
+  config: AppConfig
+): Promise<{ access_token: string; token_type: string }> {
+  const stored = await loadStoredTokens();
+
+  if (!isExpiringSoon(stored)) {
+    return { access_token: stored.access_token, token_type: stored.token_type };
+  }
+
+  const refreshed = await refreshTokens(config, stored.refresh_token);
+  await saveTokens(refreshed);
+  return { access_token: refreshed.access_token, token_type: refreshed.token_type };
+}
+
 /** Reads tokens.json and reports authentication status without exposing tokens. */
 export async function getAuthStatus(): Promise<AuthStatus> {
   let raw: string;
@@ -232,7 +339,7 @@ export async function getAuthStatus(): Promise<AuthStatus> {
     expires_at: expiresAt.toISOString(),
     access_token_expired: expired,
     message: expired
-      ? "Access token has expired. Token refresh is not implemented yet (milestone 3); re-authenticate at /login."
+      ? "Access token has expired. It will be refreshed automatically the next time an API call is made (see getValidAccessToken)."
       : "Authenticated. Access token is valid.",
   };
 }

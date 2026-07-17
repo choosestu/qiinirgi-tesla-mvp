@@ -2,7 +2,7 @@
 // Docs: https://developer.tesla.com/docs/fleet-api/endpoints/vehicle-endpoints
 
 import type { AppConfig } from "./config";
-import { loadStoredTokens } from "./auth";
+import { getValidAccessToken } from "./auth";
 
 /** Standard Tesla API envelope for successful responses. */
 interface TeslaApiResponse<T> {
@@ -143,13 +143,8 @@ async function fleetGet(
 
 /** Lists vehicles on the authenticated account. */
 export async function listVehicles(config: AppConfig): Promise<TeslaVehicleSummary[]> {
-  const tokens = await loadStoredTokens();
-  const response = await fleetGet(
-    config,
-    "/api/1/vehicles",
-    tokens.access_token,
-    tokens.token_type
-  );
+  const { access_token, token_type } = await getValidAccessToken(config);
+  const response = await fleetGet(config, "/api/1/vehicles", access_token, token_type);
   const body = await parseJsonBody(response);
 
   if (!response.ok) {
@@ -171,12 +166,12 @@ export async function getVehicleData(
   config: AppConfig,
   vin: string
 ): Promise<TeslaVehicleData> {
-  const tokens = await loadStoredTokens();
+  const { access_token, token_type } = await getValidAccessToken(config);
   const response = await fleetGet(
     config,
     `/api/1/vehicles/${encodeURIComponent(vin)}/vehicle_data`,
-    tokens.access_token,
-    tokens.token_type
+    access_token,
+    token_type
   );
   const body = await parseJsonBody(response);
 
@@ -301,12 +296,12 @@ async function sendChargeCommand(
   }
   const vin = vehicles[0].vin;
 
-  const tokens = await loadStoredTokens();
+  const { access_token, token_type } = await getValidAccessToken(config);
   const response = await fleetPost(
     config,
     `/api/1/vehicles/${encodeURIComponent(vin)}/command/${command}`,
-    tokens.access_token,
-    tokens.token_type,
+    access_token,
+    token_type,
     body
   );
   const parsed = await parseJsonBody(response);
