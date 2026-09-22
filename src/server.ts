@@ -3,11 +3,17 @@ import express from "express";
 import routes, { processSolarReading } from "./routes";
 import { loadConfig } from "./config";
 import { getRealtimeReading } from "./sungrow";
+import { DASHBOARD_HTML } from "./dashboardPage";
 
 const app = express();
 
 app.use(express.json());
 app.use("/", routes);
+
+// Serves Brett's mobile-friendly live status page (see dashboardPage.ts).
+app.get("/dashboard", (_req, res) => {
+      res.type("html").send(DASHBOARD_HTML);
+});
 
 const port = Number(process.env.PORT) || 3000;
 
