@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from "express";
+// trigger fresh build to diagnose Railway build failure
 import { loadConfig, ConfigError } from "./config";
 import {
       buildAuthorizeUrl,
