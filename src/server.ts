@@ -66,3 +66,17 @@ setInterval(() => {
 setTimeout(() => {
     void pollSungrow();
 }, 5000);
+
+
+// Exits immediately on the stop signal Railway sends during a routine
+// redeploy, so the old container is reported as stopped rather than
+// crashed. Without this, npm/node can be slow to shut down and Railway
+// force-kills the process after a timeout, which it logs as a crash.
+process.on("SIGTERM", () => {
+        console.log("Received SIGTERM, shutting down.");
+        process.exit(0);
+});
+process.on("SIGINT", () => {
+        console.log("Received SIGINT, shutting down.");
+        process.exit(0);
+});
