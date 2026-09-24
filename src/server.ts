@@ -8,6 +8,19 @@ import { DASHBOARD_HTML } from "./dashboardPage";
 const app = express();
 
 app.use(express.json());
+
+// Lets Brett's phone dashboard, hosted at qiinirgi.lovable.app, read live
+// status from this API even though it runs on a different web address.
+app.use((req, res, next) => {
+        res.setHeader("Access-Control-Allow-Origin", "https://qiinirgi.lovable.app");
+        res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+        if (req.method === "OPTIONS") {
+                  res.sendStatus(204);
+                  return;
+        }
+        next();
+});
 app.use("/", routes);
 
 // Serves Brett's mobile-friendly live status page (see dashboardPage.ts).
