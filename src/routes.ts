@@ -297,11 +297,29 @@ export interface SolarProcessResult {
  * endpoint and the internal 5-minute Sungrow poller in server.ts, so both
  * paths always go through identical logic.
  */
+// TEMPORARY SAFETY GUARD: the Sungrow measure-point IDs in sungrow.ts are
+// unverified and may map the wrong values (e.g. daily yield instead of live
+// solar power), which could fake a surplus and start charging. Until they are
+// confirmed against Brett's iSolarCloud app, decisions are computed and logged
+// but no charging commands are sent to the car. Remove once verified.
+const CHARGING_DRY_RUN = true;
+
 export async function processSolarReading(config: AppConfig, reading: SolarReading): Promise<SolarProcessResult> {
             const vehicle = await getVehicleChargingStatus(config);
             const decision = decideChargingAction(reading, vehicle, config);
 
   let commandResult: { ok: boolean; message: string } | undefined;
+            if (CHARGING_DRY_RUN) {
+                          const wouldDo =
+                                          decision.action === "start" || decision.action === "set_amps"
+                                                            ? `${decision.action} @ ${decision.amps}A`
+                                                            : decision.action;
+                          const message = `DRY RUN: would have executed "${wouldDo}" (${decision.reason}); no command sent.`;
+                          console.log(`[charging] ${message}`);
+                          commandResult = { ok: true, message };
+                          setLatestSolarState({ reading, decision, decidedAt: new Date().toISOString(), commandResult });
+                          return { reading, decision, commandResult };
+            }
             try {
                           if (decision.action === "start" && decision.amps !== undefined) {
                                           const outcome = await startCharging(config);

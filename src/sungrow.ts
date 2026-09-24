@@ -130,7 +130,14 @@ const HOME_LOAD_POINTS = ["p83128", "p83052"];
 const BATTERY_SOC_POINTS = ["p83023", "p83106"];
 const BATTERY_POWER_POINTS = ["p83024", "p83107"];
 
-type PointMap = Record<string, string | number | null | undefined>;
+// TEMPORARY: extra power/SOC-related points requested only so they show up in
+// the [sungrow-raw] log for verifying the mappings above. Remove once verified.
+const DIAGNOSTIC_POINT_IDS = [
+    "83002", "83032", "83033", "83046", "83052", "83067", "83106",
+    "83238", "83252", "83326", "83328", "83329", "83330",
+];
+
+type PointMap =Record<string, string | number | null | undefined>;
 
 function readPoint(points: PointMap, candidates: string[], fieldName: string): number {
     for (const key of candidates) {
@@ -161,17 +168,33 @@ export async function getRealtimeReading(config: AppConfig): Promise<SolarReadin
     ].map((p) => p.replace(/^p/, ""));
     const envelope = await callSungrowApi(config, "/openapi/platform/getPowerStationRealTimeData", {
           ps_id_list: [psId],
-          point_id_list: pointIds,
+          point_id_list: [...new Set([...pointIds, ...DIAGNOSTIC_POINT_IDS])],
           is_get_point_dict: "1",
     });
 
-  const data = envelope.result_data as { device_point_list?: (PointMap & { ps_id?: string | number })[] } | undefined;
+  const data = envelope.result_data as
+        | {
+                device_point_list?: (PointMap & { ps_id?: string | number })[];
+                point_dict?: { point_id: string | number; point_name?: string; point_unit?: string }[];
+          }
+        | undefined;
     const points = data?.device_point_list?.find((p) => String(p.ps_id) === psId) ?? data?.device_point_list?.[0];
     if (!points) {
           throw new SungrowApiError(
                   `iSolarCloud real-time data response for plant ${psId} had no device_point_list data.`
                 );
     }
+
+  // TEMPORARY: dump every raw point with its name/unit so the mapping can be
+  // cross-checked against Brett's iSolarCloud app. Remove once verified.
+  const names = new Map((data?.point_dict ?? []).map((d) => [`p${d.point_id}`, d]));
+    const raw = Object.entries(points)
+          .filter(([k]) => /^p\d+$/.test(k))
+          .map(([k, v]) => {
+                  const meta = names.get(k);
+                  return `${k}=${v}${meta?.point_unit ? " " + meta.point_unit : ""}${meta?.point_name ? ` (${meta.point_name})` : ""}`;
+          });
+    console.log(`[sungrow-raw] plant ${psId} @ ${new Date().toISOString()}: ${raw.join("; ")}`);
 
   return {
         solarProductionW: readPoint(points, SOLAR_PRODUCTION_POINTS, "solarProductionW") * 1000,
