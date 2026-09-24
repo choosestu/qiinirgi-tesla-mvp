@@ -83,14 +83,21 @@ async function callSungrowApi(
 }
 
 interface SungrowPlant {
-    ps_id: string;
+    ps_id: string | number;
     ps_name: string;
 }
 
+// NOTE: OAuth-authorized apps must use the /openapi/platform/* endpoints,
+// which authenticate via the Bearer access token + x-access-key headers set
+// in callSungrowApi. The older /openapi/getPowerStationList-style endpoints
+// belong to the username/password API and require a session `token` from
+// /openapi/login in the request body -- calling them with an OAuth token
+// fails with "er_missing_parameter:token".
+
 /** Lists the solar plants ("power stations") visible to this authorized account. */
 export async function getPlants(config: AppConfig): Promise<SungrowPlant[]> {
-    const envelope = await callSungrowApi(config, "/openapi/getPowerStationList", {
-          curPage: 1,
+    const envelope = await callSungrowApi(config, "/openapi/platform/queryPowerStationList", {
+          page: 1,
           size: 50,
     });
     const data = envelope.result_data as { pageList?: SungrowPlant[] } | undefined;
@@ -113,7 +120,7 @@ export async function resolvePlantId(config: AppConfig): Promise<string> {
                     "the app (Power Station Sharing) in the iSolarCloud console."
                 );
     }
-    return plants[0].ps_id;
+    return String(plants[0].ps_id);
 }
 
 // Fallback measure-point IDs to try, in order, for each field. Different
@@ -146,15 +153,23 @@ function readPoint(points: PointMap, candidates: string[], fieldName: string): n
  */
 export async function getRealtimeReading(config: AppConfig): Promise<SolarReading> {
     const psId = await resolvePlantId(config);
-    const envelope = await callSungrowApi(config, "/openapi/getPowerStationRealTimeData", {
-          ps_id: psId,
+    const pointIds = [
+          ...SOLAR_PRODUCTION_POINTS,
+          ...HOME_LOAD_POINTS,
+          ...BATTERY_SOC_POINTS,
+          ...BATTERY_POWER_POINTS,
+    ].map((p) => p.replace(/^p/, ""));
+    const envelope = await callSungrowApi(config, "/openapi/platform/getPowerStationRealTimeData", {
+          ps_id_list: [psId],
+          point_id_list: pointIds,
+          is_get_point_dict: "1",
     });
 
-  const data = envelope.result_data as { device_point?: PointMap } | undefined;
-    const points = data?.device_point;
+  const data = envelope.result_data as { device_point_list?: (PointMap & { ps_id?: string | number })[] } | undefined;
+    const points = data?.device_point_list?.find((p) => String(p.ps_id) === psId) ?? data?.device_point_list?.[0];
     if (!points) {
           throw new SungrowApiError(
-                  `iSolarCloud real-time data response for plant ${psId} had no device_point data.`
+                  `iSolarCloud real-time data response for plant ${psId} had no device_point_list data.`
                 );
     }
 
