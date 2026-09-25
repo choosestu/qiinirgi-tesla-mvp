@@ -62,6 +62,8 @@ interface TeslaChargeState {
     charging_state: string;
     charger_actual_current: number;
     charge_limit_soc: number;
+    /** Connected cable type (e.g. "IEC", "SAE"), or "<invalid>" when no cable is connected. */
+    conn_charge_cable?: string;
 }
 
 /** Response body from GET /api/1/vehicles/{vin}/vehicle_data. */
@@ -222,11 +224,35 @@ export async function getVehicleData(
   return body.response;
 }
 
+/**
+ * Whether a charge cable is connected. charging_state is authoritative:
+ * "Disconnected" always means not plugged in, and every other state
+ * (NoPower, Starting, Charging, Stopped, Complete) implies a cable. Don't
+ * use charge_port_latch for this: it reports "Engaged" with no cable in
+ * (e.g. while driving).
+ */
+function isPluggedIn(vin: string, charge: TeslaChargeState): boolean {
+    const pluggedIn = charge.charging_state !== "Disconnected";
+
+  // Cross-check against the cable signal so this class of bug is caught if
+  // Tesla's fields ever disagree again.
+  if (typeof charge.conn_charge_cable === "string") {
+        const cableConnected = charge.conn_charge_cable !== "<invalid>" && charge.conn_charge_cable !== "";
+        if (cableConnected !== pluggedIn) {
+                console.warn(
+                          `[tesla] plugged_in=${pluggedIn} (from charging_state "${charge.charging_state}") contradicts ` +
+                            `conn_charge_cable "${charge.conn_charge_cable}" for VIN ${vin}. Raw charge_state: ${JSON.stringify(charge)}`
+                        );
+        }
+  }
+    return pluggedIn;
+}
+
 function mapChargeState(vin: string, charge: TeslaChargeState): VehicleChargingStatus {
     return {
           vin,
           state_of_charge: charge.battery_level,
-          plugged_in: charge.charge_port_latch === "Engaged",
+          plugged_in: isPluggedIn(vin, charge),
           charging_state: charge.charging_state,
           charging_current: charge.charger_actual_current,
           charging_limit: charge.charge_limit_soc,
