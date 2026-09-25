@@ -23,6 +23,8 @@ import {
 import { TESLA_VIRTUAL_KEY_PUBLIC_PEM } from "./virtualKey";
 import { decideChargingAction, type SolarReading, type ChargingDecision } from "./solar";
 import { getLatestSolarState, setLatestSolarState } from "./solarState";
+import { executeChargingAction } from "./chargeCommands";
+import { getVehicleForDashboard, readVehicle } from "./vehicleState";
 import {
             buildAuthorizeUrl as buildSungrowAuthorizeUrl,
             exchangeCodeForTokens as exchangeSungrowCodeForTokens,
@@ -293,57 +295,16 @@ export interface SolarProcessResult {
 }
 
 /**
- * Runs the full solar-aware charging pipeline for a single reading: decides
- * what to do, executes it against the Tesla API, and records the outcome so
- * GET /solar/status can report it. Shared by the manual POST /solar/reading
- * endpoint and the internal Sungrow poller in server.ts, so both
- * paths always go through identical logic.
+ * Runs the one-shot charging pipeline for a single externally supplied
+ * reading (manual POST /solar/reading): reads the vehicle, decides with
+ * decideChargingAction, executes it (behind the dry-run guard in
+ * chargeCommands.ts), and records the outcome for GET /solar/status. The
+ * automatic Sungrow poller uses the session-based chargeController instead.
  */
-// TEMPORARY SAFETY GUARD: the Sungrow measure-point IDs in sungrow.ts are
-// unverified and may map the wrong values (e.g. daily yield instead of live
-// solar power), which could fake a surplus and start charging. Until they are
-// confirmed against Brett's iSolarCloud app, decisions are computed and logged
-// but no charging commands are sent to the car. Remove once verified.
-const CHARGING_DRY_RUN = true;
-
-export async function processSolarReading(
-            config: AppConfig,
-            reading: SolarReading,
-            prefetchedVehicle?: VehicleChargingStatus
-): Promise<SolarProcessResult> {
-            const vehicle = prefetchedVehicle ?? (await getVehicleChargingStatus(config));
+export async function processSolarReading(config: AppConfig, reading: SolarReading): Promise<SolarProcessResult> {
+            const vehicle = await readVehicle(config, "manual POST /solar/reading");
             const decision = decideChargingAction(reading, vehicle, config);
-
-  let commandResult: { ok: boolean; message: string } | undefined;
-            if (CHARGING_DRY_RUN) {
-                          const wouldDo =
-                                          decision.action === "start" || decision.action === "set_amps"
-                                                            ? `${decision.action} @ ${decision.amps}A`
-                                                            : decision.action;
-                          const message = `DRY RUN: would have executed "${wouldDo}" (${decision.reason}); no command sent.`;
-                          console.log(`[charging] ${message}`);
-                          commandResult = { ok: true, message };
-                          setLatestSolarState({ reading, decision, decidedAt: new Date().toISOString(), commandResult });
-                          return { reading, vehicle, decision, commandResult };
-            }
-            try {
-                          if (decision.action === "start" && decision.amps !== undefined) {
-                                          const outcome = await startCharging(config);
-                                          await setChargingAmps(config, decision.amps);
-                                          commandResult = { ok: outcome.result, message: outcome.reason };
-                          } else if (decision.action === "stop") {
-                                          const outcome = await stopCharging(config);
-                                          commandResult = { ok: outcome.result, message: outcome.reason };
-                          } else if (decision.action === "set_amps" && decision.amps !== undefined) {
-                                          const outcome = await setChargingAmps(config, decision.amps);
-                                          commandResult = { ok: outcome.result, message: outcome.reason };
-                          }
-            } catch (commandErr) {
-                          commandResult = {
-                                          ok: false,
-                                          message: commandErr instanceof Error ? commandErr.message : "Unknown error executing command.",
-                          };
-            }
+            const commandResult = await executeChargingAction(config, decision);
 
   setLatestSolarState({
                 reading,
@@ -406,23 +367,25 @@ router.get("/solar/status", (_req: Request, res: Response) => {
 /**
  * Combined, phone-friendly snapshot for Brett's live status page: current
  * Tesla charging state plus the latest solar/battery reading and decision.
- * The vehicle half is fetched independently and reported as unavailable
- * (rather than failing the whole request) if the Tesla API call errors, so
- * the page can still show whatever solar data it has instead of a blank
- * error screen.
+ * Vehicle state comes from the shared cache (vehicleState.ts), refreshed
+ * from Tesla at most every DASHBOARD_VEHICLE_MAX_AGE_MS no matter how often
+ * the page polls -- each vehicle_data call is billed. vehicleCheckedAt says
+ * how old it is. If it's unavailable, the page still gets the solar data.
  */
 router.get("/dashboard/summary", async (_req: Request, res: Response) => {
-            let vehicle: Awaited<ReturnType<typeof getVehicleChargingStatus>> | null = null;
+            let vehicle: VehicleChargingStatus | null = null;
+            let vehicleCheckedAt: string | null = null;
             let vehicleError: string | null = null;
             try {
                           const config = loadConfig();
-                          vehicle = await getVehicleChargingStatus(config);
+                          ({ vehicle, checkedAt: vehicleCheckedAt, error: vehicleError } = await getVehicleForDashboard(config));
             } catch (err) {
                           vehicleError = err instanceof Error ? err.message : "Unable to reach the vehicle.";
             }
 
              res.json({
                            vehicle,
+                           vehicleCheckedAt,
                            vehicleError,
                            solar: getLatestSolarState() ?? null,
                            generatedAt: new Date().toISOString(),

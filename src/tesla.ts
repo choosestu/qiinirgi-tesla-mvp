@@ -194,6 +194,46 @@ export async function listVehicles(config: AppConfig): Promise<TeslaVehicleSumma
   return body.response;
 }
 
+// The account's first VIN, cached after the first lookup: every Fleet API
+// request is billed, and listing vehicles before each read/command doubled
+// the cost of everything.
+let cachedVin: string | undefined;
+
+async function resolveVin(config: AppConfig): Promise<string> {
+    if (cachedVin) return cachedVin;
+    const vehicles = await listVehicles(config);
+    if (vehicles.length === 0) {
+          throw new TeslaApiError("No vehicles found on this Tesla account.");
+    }
+    cachedVin = vehicles[0].vin;
+    return cachedVin;
+}
+
+/**
+ * Asks the account's first vehicle to wake up (POST /api/1/vehicles/{vin}/wake_up).
+ * Returns once Tesla accepts the request; the car takes a few seconds to come
+ * online, so callers should re-read vehicle_data later rather than immediately.
+ * Wakes are the most expensive Fleet API call -- use sparingly.
+ */
+export async function wakeVehicle(config: AppConfig): Promise<void> {
+    const vin = await resolveVin(config);
+    const { access_token, token_type } = await getValidAccessToken(config);
+    const url = new URL(`/api/1/vehicles/${encodeURIComponent(vin)}/wake_up`, config.teslaApiBase);
+    let response: Response;
+    try {
+          response = await fetch(url, {
+                  method: "POST",
+                  headers: { Authorization: authHeader(token_type, access_token), Accept: "application/json" },
+          });
+    } catch (err) {
+          throw new TeslaApiError(`Could not reach Tesla Fleet API at ${url.host} to wake the vehicle.`, undefined, err);
+    }
+    if (!response.ok) {
+          const body = await parseJsonBody(response);
+          throw new TeslaApiError(`Tesla wake_up failed for VIN ${vin} (HTTP ${response.status}): ${JSON.stringify(body)}`, response.status);
+    }
+}
+
 /** Fetches live vehicle data for a VIN via GET /api/1/vehicles/{vin}/vehicle_data. */
 export async function getVehicleData(
     config: AppConfig,
@@ -261,18 +301,12 @@ function mapChargeState(vin: string, charge: TeslaChargeState): VehicleChargingS
 
 /**
  * Returns charging status for the account's first vehicle.
- * Uses the official Fleet API list + vehicle_data endpoints (live vehicle call).
+ * One billable vehicle_data call (the VIN is cached after the first lookup).
  */
 export async function getVehicleChargingStatus(
     config: AppConfig
   ): Promise<VehicleChargingStatus> {
-    const vehicles = await listVehicles(config);
-
-  if (vehicles.length === 0) {
-        throw new TeslaApiError("No vehicles found on this Tesla account.");
-  }
-
-  const vin = vehicles[0].vin;
+    const vin = await resolveVin(config);
     const data = await getVehicleData(config, vin);
     return mapChargeState(data.vin, data.charge_state);
 }
@@ -349,11 +383,7 @@ async function sendChargeCommand(
     command: ChargeCommandOutcome["command"],
     body?: Record<string, unknown>
   ): Promise<ChargeCommandOutcome> {
-    const vehicles = await listVehicles(config);
-    if (vehicles.length === 0) {
-          throw new TeslaApiError("No vehicles found on this Tesla account.");
-    }
-    const vin = vehicles[0].vin;
+    const vin = await resolveVin(config);
 
   const { access_token, token_type } = await getValidAccessToken(config);
     const response = await fleetPost(

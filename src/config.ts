@@ -35,9 +35,11 @@ export interface AppConfig {
            */
   localBridgeApiKey?: string;
           /**
-           * Battery state of charge (0-100) below which available solar surplus is
-           * reserved for the home battery rather than diverted to EV charging.
-           * Tunable per household; defaults to a conservative 90%.
+           * Home battery floor (state of charge, 0-100). At or above it, the home
+           * battery covers short dips while the car charges; below it, surplus is
+           * reserved for the home battery and the car stops if the surplus alone
+           * can't sustain the minimum session rate. Defaults to 80% (Brett's choice,
+           * keeping enough in the home battery for the evening).
            */
   batteryReserveSocPercent: number;
           /**
@@ -136,7 +138,7 @@ export function loadConfig(): AppConfig {
                                   ),
                       teslaCommandCaCertBase64: optionalOrUndefined("TESLA_COMMAND_CA_CERT_BASE64"),
                       localBridgeApiKey: optionalOrUndefined("LOCAL_BRIDGE_API_KEY"),
-                      batteryReserveSocPercent: Number(optional("BATTERY_RESERVE_SOC_PERCENT", "90")),
+                      batteryReserveSocPercent: Number(optional("BATTERY_RESERVE_SOC_PERCENT", "80")),
                       assumedVoltageV: Number(optional("ASSUMED_VOLTAGE_V", "240")),
                       surplusBufferW: Number(optional("SURPLUS_BUFFER_W", "200")),
                       sungrowAppKey: optionalOrUndefined("SUNGROW_APP_KEY"),
