@@ -28,8 +28,8 @@ export interface SolarReading {
   homeLoadW: number;
     /** Battery state of charge, 0-100. */
   batterySocPercent: number;
-    /** Battery charge (+) or discharge (-) power, in watts. Null when the
-     * inverter's API doesn't report it (currently the case for Sungrow). */
+    /** Battery charge (+) or discharge (-) power, in watts. Null when it
+     * couldn't be read from the inverter. */
   batteryPowerW: number | null;
     /** ISO timestamp the reading was taken, set by the bridge that read it. */
   readingTakenAt: string;

@@ -7,9 +7,8 @@
 // from /openapi/platform/getPowerStationRealTimeData are already in W; SOC
 // (p83252) is a 0-1 fraction.
 //
-// Battery charge/discharge power is not mapped yet: no plant-level point has
-// returned a value for it, so batteryPowerW is null until a device-level
-// point is identified (see probeBatteryPowerOnce).
+// Battery charge/discharge power isn't reported at plant level; it comes from
+// the hybrid inverter's device-level points instead (see getBatteryPowerW).
 
 import type { AppConfig } from "./config";
 import type { SolarReading } from "./solar";
@@ -150,13 +149,26 @@ function readPoint(points: PointMap, candidates: string[], fieldName: string): n
         );
 }
 
+type PointDict = { point_id: string | number; point_name?: string; point_unit?: string }[];
+
+/** Formats raw points as "p123=value unit (name)" for the [sungrow-raw] log. */
+function formatRawPoints(points: PointMap, pointDict: PointDict | undefined): string {
+    const names = new Map((pointDict ?? []).map((d) => [`p${d.point_id}`, d]));
+    return Object.entries(points)
+          .filter(([k]) => /^p\d+$/.test(k))
+          .map(([k, v]) => {
+                  const meta = names.get(k);
+                  return `${k}=${v}${meta?.point_unit ? " " + meta.point_unit : ""}${meta?.point_name ? ` (${meta.point_name})` : ""}`;
+          })
+          .join("; ");
+}
+
 /**
  * Fetches the current real-time reading for the resolved plant and maps it
  * onto the app's SolarReading shape.
  */
 export async function getRealtimeReading(config: AppConfig): Promise<SolarReading> {
     const psId = await resolvePlantId(config);
-    await probeBatteryPowerOnce(config, psId);
     const pointIds = [
           ...SOLAR_PRODUCTION_POINTS,
           ...HOME_LOAD_POINTS,
@@ -169,10 +181,7 @@ export async function getRealtimeReading(config: AppConfig): Promise<SolarReadin
     });
 
   const data = envelope.result_data as
-        | {
-                device_point_list?: (PointMap & { ps_id?: string | number })[];
-                point_dict?: { point_id: string | number; point_name?: string; point_unit?: string }[];
-          }
+        | { device_point_list?: (PointMap & { ps_id?: string | number })[]; point_dict?: PointDict }
         | undefined;
     const points = data?.device_point_list?.find((p) => String(p.ps_id) === psId) ?? data?.device_point_list?.[0];
     if (!points) {
@@ -183,87 +192,76 @@ export async function getRealtimeReading(config: AppConfig): Promise<SolarReadin
 
   // TEMPORARY: dump every raw point with its name/unit so the mapping can be
   // cross-checked against Brett's iSolarCloud app. Remove once verified.
-  const names = new Map((data?.point_dict ?? []).map((d) => [`p${d.point_id}`, d]));
-    const raw = Object.entries(points)
-          .filter(([k]) => /^p\d+$/.test(k))
-          .map(([k, v]) => {
-                  const meta = names.get(k);
-                  return `${k}=${v}${meta?.point_unit ? " " + meta.point_unit : ""}${meta?.point_name ? ` (${meta.point_name})` : ""}`;
-          });
-    console.log(`[sungrow-raw] plant ${psId} @ ${new Date().toISOString()}: ${raw.join("; ")}`);
+  console.log(`[sungrow-raw] plant ${psId} @ ${new Date().toISOString()}: ${formatRawPoints(points, data?.point_dict)}`);
 
   return {
         solarProductionW: readPoint(points, SOLAR_PRODUCTION_POINTS, "solarProductionW"),
         homeLoadW: readPoint(points, HOME_LOAD_POINTS, "homeLoadW"),
         batterySocPercent: readPoint(points, BATTERY_SOC_POINTS, "batterySocPercent") * 100,
-        batteryPowerW: null,
+        batteryPowerW: await getBatteryPowerW(config, psId),
         readingTakenAt: new Date().toISOString(),
   };
 }
 
-// TEMPORARY battery-power investigation. Plant-level points never report
-// battery charge/discharge power for Brett's plant, so this lists the plant's
-// devices and asks each hybrid inverter (device_type 14) / battery
-// (device_type 43) for its device-level points, logging everything returned
-// as [sungrow-probe]. Runs once per process, read-only. Remove once a battery
-// power point is identified.
-const DEVICE_PROBE_POINTS: Record<number, string[]> = {
-    // Hybrid inverter: 13126 battery charging power, 13150 battery discharging
-    // power, 13141 battery level, 13119 load power, plus neighbours.
-    14: Array.from({ length: 60 }, (_, i) => String(13101 + i)),
-    43: Array.from({ length: 30 }, (_, i) => String(58601 + i)),
-};
+// Battery charge/discharge power isn't reported at plant level, only by the
+// hybrid inverter (device_type 14, e.g. Brett's SH10RT) as two separate
+// non-negative points. Verified against Brett's plant: solar = load + export
+// + p13126 balanced to within 1 W, and battery V x A matched p13126.
+const HYBRID_INVERTER_DEVICE_TYPE = 14;
+const BATTERY_CHARGING_POWER_POINT = "13126"; // W
+const BATTERY_DISCHARGING_POWER_POINT = "13150"; // W
 
-let batteryProbeStarted = false;
+// Device ps_keys don't change, so the inverter lookup is cached per plant.
+const inverterPsKeyCache = new Map<string, string>();
 
-export async function probeBatteryPowerOnce(config: AppConfig, psId: string): Promise<void> {
-    if (batteryProbeStarted) return;
-    batteryProbeStarted = true;
+async function resolveInverterPsKey(config: AppConfig, psId: string): Promise<string> {
+    const cached = inverterPsKeyCache.get(psId);
+    if (cached) return cached;
+    const envelope = await callSungrowApi(config, "/openapi/platform/getDeviceListByPsId", {
+          ps_id: psId,
+          page: 1,
+          size: 100,
+    });
+    const devices =
+          (envelope.result_data as { pageList?: { ps_key?: string; device_type?: number }[] } | undefined)?.pageList ?? [];
+    const inverter = devices.find((d) => d.device_type === HYBRID_INVERTER_DEVICE_TYPE && d.ps_key);
+    if (!inverter?.ps_key) {
+          throw new SungrowApiError(`No hybrid inverter (device_type ${HYBRID_INVERTER_DEVICE_TYPE}) found on plant ${psId}.`);
+    }
+    inverterPsKeyCache.set(psId, inverter.ps_key);
+    return inverter.ps_key;
+}
+
+/**
+ * Returns battery power in W (+ charging, - discharging) from the hybrid
+ * inverter's device-level points, or null if it can't be read. Null is safe:
+ * decideChargingAction then assumes a below-reserve battery claims all surplus.
+ */
+async function getBatteryPowerW(config: AppConfig, psId: string): Promise<number | null> {
     try {
-          const list = await callSungrowApi(config, "/openapi/platform/getDeviceListByPsId", {
-                  ps_id: psId,
-                  page: 1,
-                  size: 100,
+          const psKey = await resolveInverterPsKey(config, psId);
+          const envelope = await callSungrowApi(config, "/openapi/platform/getDeviceRealTimeData", {
+                  device_type: HYBRID_INVERTER_DEVICE_TYPE,
+                  ps_key_list: [psKey],
+                  point_id_list: [BATTERY_CHARGING_POWER_POINT, BATTERY_DISCHARGING_POWER_POINT],
+                  is_get_point_dict: "1",
           });
-          const devices =
-                  (list.result_data as { pageList?: { ps_key?: string; device_type?: number; device_name?: string; device_model_code?: string }[] } | undefined)
-                    ?.pageList ?? [];
-          console.log(
-                  `[sungrow-probe] devices: ` +
-                    devices.map((d) => `${d.device_name} type=${d.device_type} model=${d.device_model_code} ps_key=${d.ps_key}`).join(" | ")
-                );
-
-      for (const device of devices) {
-              const pointIds = device.device_type !== undefined ? DEVICE_PROBE_POINTS[device.device_type] : undefined;
-              if (!pointIds || !device.ps_key) continue;
-              try {
-                        const rt = await callSungrowApi(config, "/openapi/platform/getDeviceRealTimeData", {
-                                    device_type: device.device_type,
-                                    ps_key_list: [device.ps_key],
-                                    point_id_list: pointIds,
-                                    is_get_point_dict: "1",
-                        });
-                        const data = rt.result_data as
-                          | { device_point_list?: { device_point?: PointMap }[]; point_dict?: { point_id: string | number; point_name?: string; point_unit?: string }[] }
-                          | undefined;
-                        const names = new Map((data?.point_dict ?? []).map((d) => [`p${d.point_id}`, d]));
-                        for (const entry of data?.device_point_list ?? []) {
-                                    const raw = Object.entries(entry.device_point ?? {})
-                                      .filter(([k, v]) => /^p\d+$/.test(k) && v !== null && v !== undefined && v !== "")
-                                      .map(([k, v]) => {
-                                                    const meta = names.get(k);
-                                                    return `${k}=${v}${meta?.point_unit ? " " + meta.point_unit : ""}${meta?.point_name ? ` (${meta.point_name})` : ""}`;
-                                      });
-                                    console.log(`[sungrow-probe] ${device.ps_key} (type ${device.device_type}): ${raw.join("; ") || "no non-null points"}`);
-                        }
-                        if (!data?.device_point_list?.length) {
-                                    console.log(`[sungrow-probe] ${device.ps_key}: empty response ${JSON.stringify(rt.result_data)}`);
-                        }
-              } catch (err) {
-                        console.log(`[sungrow-probe] ${device.ps_key} realtime failed: ${err instanceof Error ? err.message : err}`);
-              }
-      }
+          const data = envelope.result_data as
+                  | { device_point_list?: { device_point?: PointMap }[]; point_dict?: PointDict }
+                  | undefined;
+          const points = data?.device_point_list?.[0]?.device_point;
+          if (!points) {
+                  throw new SungrowApiError(`Inverter ${psKey} real-time response had no device_point data.`);
+          }
+          console.log(`[sungrow-raw] inverter ${psKey}: ${formatRawPoints(points, data?.point_dict)}`);
+          const chargingW = readPoint(points, [`p${BATTERY_CHARGING_POWER_POINT}`], "batteryChargingPowerW");
+          const dischargingW = readPoint(points, [`p${BATTERY_DISCHARGING_POWER_POINT}`], "batteryDischargingPowerW");
+          return chargingW - dischargingW;
     } catch (err) {
-          console.log(`[sungrow-probe] device list failed: ${err instanceof Error ? err.message : err}`);
+          console.error(
+                  "[sungrow-poll] Could not read battery power; treating it as unknown:",
+                  err instanceof Error ? err.message : err
+                );
+          return null;
     }
 }
