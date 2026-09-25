@@ -8,7 +8,7 @@
 // (p83252) is a 0-1 fraction.
 //
 // Battery charge/discharge power isn't reported at plant level; it comes from
-// the hybrid inverter's device-level points instead (see getBatteryPowerW).
+// the hybrid inverter's device-level points instead (see getInverterReadings).
 
 import type { AppConfig } from "./config";
 import type { SolarReading } from "./solar";
@@ -124,6 +124,8 @@ export async function resolvePlantId(config: AppConfig): Promise<string> {
 const SOLAR_PRODUCTION_POINTS = ["p83033"]; // plant power, W
 const HOME_LOAD_POINTS = ["p83106"]; // load power, W
 const BATTERY_SOC_POINTS = ["p83252"]; // battery level, 0-1 fraction
+// Display-only: today's generation (Wh), reported as kWh on SolarReading.
+const SOLAR_GENERATION_TODAY_POINT = "p83022";
 
 // TEMPORARY: extra power/SOC-related points requested only so they show up in
 // the [sungrow-raw] log for verifying the mappings above. Remove once verified.
@@ -163,6 +165,14 @@ function formatRawPoints(points: PointMap, pointDict: PointDict | undefined): st
           .join("; ");
 }
 
+/** Like readPoint, but returns null instead of throwing (for display-only fields). */
+function readOptionalPoint(points: PointMap, key: string): number | null {
+    const raw = points[key];
+    if (raw === null || raw === undefined || raw === "") return null;
+    const value = typeof raw === "number" ? raw : Number(raw);
+    return Number.isNaN(value) ? null : value;
+}
+
 /**
  * Fetches the current real-time reading for the resolved plant and maps it
  * onto the app's SolarReading shape.
@@ -173,6 +183,7 @@ export async function getRealtimeReading(config: AppConfig): Promise<SolarReadin
           ...SOLAR_PRODUCTION_POINTS,
           ...HOME_LOAD_POINTS,
           ...BATTERY_SOC_POINTS,
+          SOLAR_GENERATION_TODAY_POINT,
     ].map((p) => p.replace(/^p/, ""));
     const envelope = await callSungrowApi(config, "/openapi/platform/getPowerStationRealTimeData", {
           ps_id_list: [psId],
@@ -194,22 +205,31 @@ export async function getRealtimeReading(config: AppConfig): Promise<SolarReadin
   // cross-checked against Brett's iSolarCloud app. Remove once verified.
   console.log(`[sungrow-raw] plant ${psId} @ ${new Date().toISOString()}: ${formatRawPoints(points, data?.point_dict)}`);
 
+  const inverter = await getInverterReadings(config, psId);
+    const generationTodayWh = readOptionalPoint(points, SOLAR_GENERATION_TODAY_POINT);
+
   return {
         solarProductionW: readPoint(points, SOLAR_PRODUCTION_POINTS, "solarProductionW"),
         homeLoadW: readPoint(points, HOME_LOAD_POINTS, "homeLoadW"),
         batterySocPercent: readPoint(points, BATTERY_SOC_POINTS, "batterySocPercent") * 100,
-        batteryPowerW: await getBatteryPowerW(config, psId),
+        batteryPowerW: inverter.batteryPowerW,
+        gridImportW: inverter.gridImportW,
+        gridExportW: inverter.gridExportW,
+        solarGenerationTodayKWh: generationTodayWh === null ? null : generationTodayWh / 1000,
         readingTakenAt: new Date().toISOString(),
   };
 }
 
-// Battery charge/discharge power isn't reported at plant level, only by the
-// hybrid inverter (device_type 14, e.g. Brett's SH10RT) as two separate
-// non-negative points. Verified against Brett's plant: solar = load + export
-// + p13126 balanced to within 1 W, and battery V x A matched p13126.
+// Battery charge/discharge power and grid flow aren't reported at plant
+// level, only by the hybrid inverter (device_type 14, e.g. Brett's SH10RT),
+// each as non-negative W points. Verified against Brett's plant: solar =
+// load + export + battery charging balanced to within 1 W, and battery
+// V x A matched p13126.
 const HYBRID_INVERTER_DEVICE_TYPE = 14;
 const BATTERY_CHARGING_POWER_POINT = "13126"; // W
 const BATTERY_DISCHARGING_POWER_POINT = "13150"; // W
+const GRID_IMPORT_POWER_POINT = "13149"; // W
+const GRID_EXPORT_POWER_POINT = "13121"; // W
 
 // Device ps_keys don't change, so the inverter lookup is cached per plant.
 const inverterPsKeyCache = new Map<string, string>();
@@ -232,18 +252,30 @@ async function resolveInverterPsKey(config: AppConfig, psId: string): Promise<st
     return inverter.ps_key;
 }
 
+interface InverterReadings {
+    batteryPowerW: number | null;
+    gridImportW: number | null;
+    gridExportW: number | null;
+}
+
 /**
- * Returns battery power in W (+ charging, - discharging) from the hybrid
- * inverter's device-level points, or null if it can't be read. Null is safe:
+ * Reads battery power (+ charging, - discharging) and grid import/export
+ * from the hybrid inverter's device-level points in a single call. Any
+ * value that can't be read is null. Null battery power is safe:
  * decideChargingAction then assumes a below-reserve battery claims all surplus.
  */
-async function getBatteryPowerW(config: AppConfig, psId: string): Promise<number | null> {
+async function getInverterReadings(config: AppConfig, psId: string): Promise<InverterReadings> {
     try {
           const psKey = await resolveInverterPsKey(config, psId);
           const envelope = await callSungrowApi(config, "/openapi/platform/getDeviceRealTimeData", {
                   device_type: HYBRID_INVERTER_DEVICE_TYPE,
                   ps_key_list: [psKey],
-                  point_id_list: [BATTERY_CHARGING_POWER_POINT, BATTERY_DISCHARGING_POWER_POINT],
+                  point_id_list: [
+                            BATTERY_CHARGING_POWER_POINT,
+                            BATTERY_DISCHARGING_POWER_POINT,
+                            GRID_IMPORT_POWER_POINT,
+                            GRID_EXPORT_POWER_POINT,
+                  ],
                   is_get_point_dict: "1",
           });
           const data = envelope.result_data as
@@ -254,14 +286,18 @@ async function getBatteryPowerW(config: AppConfig, psId: string): Promise<number
                   throw new SungrowApiError(`Inverter ${psKey} real-time response had no device_point data.`);
           }
           console.log(`[sungrow-raw] inverter ${psKey}: ${formatRawPoints(points, data?.point_dict)}`);
-          const chargingW = readPoint(points, [`p${BATTERY_CHARGING_POWER_POINT}`], "batteryChargingPowerW");
-          const dischargingW = readPoint(points, [`p${BATTERY_DISCHARGING_POWER_POINT}`], "batteryDischargingPowerW");
-          return chargingW - dischargingW;
+          const chargingW = readOptionalPoint(points, `p${BATTERY_CHARGING_POWER_POINT}`);
+          const dischargingW = readOptionalPoint(points, `p${BATTERY_DISCHARGING_POWER_POINT}`);
+          return {
+                  batteryPowerW: chargingW === null || dischargingW === null ? null : chargingW - dischargingW,
+                  gridImportW: readOptionalPoint(points, `p${GRID_IMPORT_POWER_POINT}`),
+                  gridExportW: readOptionalPoint(points, `p${GRID_EXPORT_POWER_POINT}`),
+          };
     } catch (err) {
           console.error(
-                  "[sungrow-poll] Could not read battery power; treating it as unknown:",
+                  "[sungrow-poll] Could not read inverter points; battery power and grid flow unknown:",
                   err instanceof Error ? err.message : err
                 );
-          return null;
+          return { batteryPowerW: null, gridImportW: null, gridExportW: null };
     }
 }

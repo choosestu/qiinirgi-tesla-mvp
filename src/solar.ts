@@ -31,6 +31,12 @@ export interface SolarReading {
     /** Battery charge (+) or discharge (-) power, in watts. Null when it
      * couldn't be read from the inverter. */
   batteryPowerW: number | null;
+    /** Display-only (not used by decideChargingAction): power drawn from the grid, in watts. */
+  gridImportW?: number | null;
+    /** Display-only: power exported to the grid, in watts. */
+  gridExportW?: number | null;
+    /** Display-only: solar energy generated so far today, in kWh. */
+  solarGenerationTodayKWh?: number | null;
     /** ISO timestamp the reading was taken, set by the bridge that read it. */
   readingTakenAt: string;
 }
