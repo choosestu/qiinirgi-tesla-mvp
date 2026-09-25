@@ -38,7 +38,7 @@ export interface AppConfig {
            * Home battery floor (state of charge, 0-100). At or above it, the home
            * battery covers short dips while the car charges; below it, surplus is
            * reserved for the home battery and the car stops if the surplus alone
-           * can't sustain the minimum session rate. Defaults to 80% (Brett's choice,
+           * can't sustain the minimum session rate. Defaults to 80% (Stu's choice,
            * keeping enough in the home battery for the evening).
            */
   batteryReserveSocPercent: number;

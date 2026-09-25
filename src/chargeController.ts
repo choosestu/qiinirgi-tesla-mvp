@@ -41,6 +41,8 @@ const RESTART_COOLDOWN_MS = envMs("CHARGE_RESTART_COOLDOWN_MS", 15 * MIN);
 const UNAVAILABLE_RECHECK_MS = envMs("CHARGE_UNAVAILABLE_RECHECK_MS", 45 * MIN);
 const SESSION_CONFIRM_MS = envMs("CHARGE_SESSION_CONFIRM_MS", 60 * MIN);
 const WAKE_RETRY_MS = 1 * MIN;
+const MAX_WAKES_PER_DAY = Number(process.env.CHARGE_MAX_WAKES_PER_DAY) || 2;
+const UNPLUGGED_AFTER_WAKE_RECHECK_MS = envMs("CHARGE_UNPLUGGED_AFTER_WAKE_RECHECK_MS", 3 * 60 * MIN);
 const LOW_DRAW_CONFIRM_MS = 5 * MIN;
 const LOW_DRAW_MIN_CONFIRM_INTERVAL_MS = 30 * MIN;
 
@@ -63,6 +65,8 @@ const state = {
   /** Don't read the car again before this (unplugged / full / asleep backoff). */
   nextVehicleCheckAt: 0,
   wakeRequestedAt: 0,
+  wakesDay: "",
+  wakesToday: 0,
   lowDrawSince: null as number | null,
   lastLoggedKey: "",
 };
@@ -113,6 +117,10 @@ function clampAmps(amps: number): number {
 function time(ms: number): string {
   // Brett's car is in AEST (UTC+10).
   return new Date(ms + 10 * 60 * MIN).toISOString().slice(11, 16) + " AEST";
+}
+
+function aestDate(ms: number): string {
+  return new Date(ms + 10 * 60 * MIN).toISOString().slice(0, 10);
 }
 
 function noop(reason: string): ControllerResult {
@@ -172,8 +180,23 @@ async function handleIdle(config: AppConfig, now: number): Promise<ControllerRes
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const asleep = /asleep|offline|408/.test(message);
+    // An asleep car might not even be at home, so wakes are capped per day
+    // (they cost $0.02 each, 10x a read, and drain the car's battery).
+    const today = aestDate(now);
+    if (state.wakesDay !== today) {
+      state.wakesDay = today;
+      state.wakesToday = 0;
+    }
+    if (asleep && state.wakesToday >= MAX_WAKES_PER_DAY) {
+      state.nextVehicleCheckAt = now + UNAVAILABLE_RECHECK_MS;
+      return noop(
+        `Charging opportunity, but the car is asleep and today's ${MAX_WAKES_PER_DAY}-wake limit is used; ` +
+          `reading again (no wake) at ${time(state.nextVehicleCheckAt)}.`
+      );
+    }
     if (asleep && now - state.wakeRequestedAt > UNAVAILABLE_RECHECK_MS) {
       state.wakeRequestedAt = now;
+      state.wakesToday += 1;
       state.nextVehicleCheckAt = now + WAKE_RETRY_MS;
       if (CHARGING_DRY_RUN) {
         // Plugged-in Teslas sleep when not charging, so assume it's plugged in
@@ -198,7 +221,10 @@ async function handleIdle(config: AppConfig, now: number): Promise<ControllerRes
   }
 
   if (!vehicle.plugged_in) {
-    state.nextVehicleCheckAt = now + UNAVAILABLE_RECHECK_MS;
+    // If we just woke it to find out, it's likely away or not coming back
+    // soon: back off longer so we don't keep paying to wake it.
+    const wokeForThis = now - state.wakeRequestedAt <= 5 * MIN;
+    state.nextVehicleCheckAt = now + (wokeForThis ? UNPLUGGED_AFTER_WAKE_RECHECK_MS : UNAVAILABLE_RECHECK_MS);
     return noop(`Charging opportunity, but the car isn't plugged in; next check ${time(state.nextVehicleCheckAt)}.`);
   }
   if (vehicle.charging_state === "Complete" || vehicle.state_of_charge >= vehicle.charging_limit) {

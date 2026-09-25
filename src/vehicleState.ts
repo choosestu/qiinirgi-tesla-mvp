@@ -35,7 +35,7 @@ export function getCachedVehicle(): CachedVehicle | null {
 
 // The dashboard may refresh vehicle state itself, but at most this often,
 // however many times the page polls /dashboard/summary.
-const DASHBOARD_VEHICLE_MAX_AGE_MS = Number(process.env.DASHBOARD_VEHICLE_MAX_AGE_MS) || 15 * 60 * 1000;
+const DASHBOARD_VEHICLE_MAX_AGE_MS = Number(process.env.DASHBOARD_VEHICLE_MAX_AGE_MS) || 30 * 60 * 1000;
 
 /**
  * Vehicle state for /dashboard/summary: the cached state, refreshed from
