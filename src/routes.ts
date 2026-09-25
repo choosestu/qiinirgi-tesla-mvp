@@ -271,7 +271,7 @@ function parseSolarReading(body: unknown): SolarReading | null {
                           typeof solarProductionW !== "number" ||
                           typeof homeLoadW !== "number" ||
                           typeof batterySocPercent !== "number" ||
-                          typeof batteryPowerW !== "number"
+                          (typeof batteryPowerW !== "number" && batteryPowerW !== null)
                         ) {
                           return null;
             }
@@ -372,7 +372,7 @@ router.post("/solar/reading", async (req: Request, res: Response) => {
                                           res.status(400).json({
                                                             error: "invalid_reading",
                                                             message:
-                                                                                "Body must include numeric solarProductionW, homeLoadW, batterySocPercent, and batteryPowerW.",
+                                                                                "Body must include numeric solarProductionW, homeLoadW, batterySocPercent, and batteryPowerW (number or null).",
                                           });
                                           return;
                           }

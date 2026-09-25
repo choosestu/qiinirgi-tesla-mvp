@@ -28,8 +28,9 @@ export interface SolarReading {
   homeLoadW: number;
     /** Battery state of charge, 0-100. */
   batterySocPercent: number;
-    /** Battery charge (+) or discharge (-) power, in watts. */
-  batteryPowerW: number;
+    /** Battery charge (+) or discharge (-) power, in watts. Null when the
+     * inverter's API doesn't report it (currently the case for Sungrow). */
+  batteryPowerW: number | null;
     /** ISO timestamp the reading was taken, set by the bridge that read it. */
   readingTakenAt: string;
 }
@@ -86,7 +87,13 @@ export function decideChargingAction(
     const rawSurplusW = reading.solarProductionW - reading.homeLoadW + evDrawW;
 
   const batteryBelowReserve = reading.batterySocPercent < config.batteryReserveSocPercent;
-    const batteryClaimW = batteryBelowReserve && reading.batteryPowerW > 0 ? reading.batteryPowerW : 0;
+    // With battery power unknown, a battery below reserve is assumed to claim
+    // all of the surplus, so the EV never takes power the battery needs.
+    const batteryClaimW = !batteryBelowReserve
+      ? 0
+      : reading.batteryPowerW === null
+        ? Math.max(rawSurplusW, 0)
+        : Math.max(reading.batteryPowerW, 0);
 
   const availableForEvW = rawSurplusW - batteryClaimW;
 
