@@ -81,10 +81,11 @@ export interface AppConfig {
            */
   sungrowPlantId?: string;
           /**
-           * How often (ms) the server polls iSolarCloud for a fresh reading and
-           * re-runs the charging decision. iSolarCloud only updates its own data
-           * every 5 minutes, so polling faster than that just re-reads stale data.
-           * Defaults to 5 minutes.
+           * How often (ms) the server polls iSolarCloud for a fresh reading.
+           * iSolarCloud's own data refreshes roughly every 5 minutes, but polling
+           * often picks up each refresh soon after it lands. The gateway allows
+           * ~10 req/s, so 15 s (2 calls/poll) is well within limits. Tesla is only
+           * called when the decision would change (see server.ts). Defaults to 15 s.
            */
   sungrowPollIntervalMs: number;
 }
@@ -144,6 +145,6 @@ export function loadConfig(): AppConfig {
                       sungrowRegion: optionalOrUndefined("SUNGROW_REGION"),
                       sungrowRedirectUri: optionalOrUndefined("SUNGROW_REDIRECT_URI"),
                       sungrowPlantId: optionalOrUndefined("SUNGROW_PLANT_ID"),
-                      sungrowPollIntervalMs: Number(optional("SUNGROW_POLL_INTERVAL_MS", "300000")),
+                      sungrowPollIntervalMs: Number(optional("SUNGROW_POLL_INTERVAL_MS", "15000")),
           };
 }

@@ -18,6 +18,7 @@ import {
             MIN_CHARGING_AMPS,
             MAX_CHARGING_AMPS,
             TeslaApiError,
+            type VehicleChargingStatus,
 } from "./tesla";
 import { TESLA_VIRTUAL_KEY_PUBLIC_PEM } from "./virtualKey";
 import { decideChargingAction, type SolarReading, type ChargingDecision } from "./solar";
@@ -286,6 +287,7 @@ function parseSolarReading(body: unknown): SolarReading | null {
 
 export interface SolarProcessResult {
             reading: SolarReading;
+            vehicle: VehicleChargingStatus;
             decision: ChargingDecision;
             commandResult?: { ok: boolean; message: string };
 }
@@ -294,7 +296,7 @@ export interface SolarProcessResult {
  * Runs the full solar-aware charging pipeline for a single reading: decides
  * what to do, executes it against the Tesla API, and records the outcome so
  * GET /solar/status can report it. Shared by the manual POST /solar/reading
- * endpoint and the internal 5-minute Sungrow poller in server.ts, so both
+ * endpoint and the internal Sungrow poller in server.ts, so both
  * paths always go through identical logic.
  */
 // TEMPORARY SAFETY GUARD: the Sungrow measure-point IDs in sungrow.ts are
@@ -304,8 +306,12 @@ export interface SolarProcessResult {
 // but no charging commands are sent to the car. Remove once verified.
 const CHARGING_DRY_RUN = true;
 
-export async function processSolarReading(config: AppConfig, reading: SolarReading): Promise<SolarProcessResult> {
-            const vehicle = await getVehicleChargingStatus(config);
+export async function processSolarReading(
+            config: AppConfig,
+            reading: SolarReading,
+            prefetchedVehicle?: VehicleChargingStatus
+): Promise<SolarProcessResult> {
+            const vehicle = prefetchedVehicle ?? (await getVehicleChargingStatus(config));
             const decision = decideChargingAction(reading, vehicle, config);
 
   let commandResult: { ok: boolean; message: string } | undefined;
@@ -318,7 +324,7 @@ export async function processSolarReading(config: AppConfig, reading: SolarReadi
                           console.log(`[charging] ${message}`);
                           commandResult = { ok: true, message };
                           setLatestSolarState({ reading, decision, decidedAt: new Date().toISOString(), commandResult });
-                          return { reading, decision, commandResult };
+                          return { reading, vehicle, decision, commandResult };
             }
             try {
                           if (decision.action === "start" && decision.amps !== undefined) {
@@ -346,7 +352,7 @@ export async function processSolarReading(config: AppConfig, reading: SolarReadi
                 commandResult,
   });
 
-  return { reading, decision, commandResult };
+  return { reading, vehicle, decision, commandResult };
 }
 
 /**
